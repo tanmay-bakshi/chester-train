@@ -1,14 +1,16 @@
-from pathlib import Path
-from typing import BinaryIO, Iterator
 import subprocess
 import sys
 import threading
+from pathlib import Path
+from typing import BinaryIO, Iterator
 
 import torch
 from torch.utils.data import IterableDataset
 
 
-def read_tensor_from_file(file: BinaryIO, dtype: torch.dtype, shape: tuple[int, ...]) -> torch.Tensor:
+def read_tensor_from_file(
+    file: BinaryIO, dtype: torch.dtype, shape: tuple[int, ...]
+) -> torch.Tensor:
     num_elements = 1
     for dim in shape:
         num_elements *= dim
@@ -54,7 +56,7 @@ class ChessDatasetClient(IterableDataset):
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=1024 * 1024, # 1MB buffer size
+            bufsize=1024 * 1024,  # 1MB buffer size
         )
 
         if self.process.stdout is None:
@@ -70,11 +72,15 @@ class ChessDatasetClient(IterableDataset):
             sys.stderr.buffer.write(line)
             sys.stderr.flush()
 
-    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def __iter__(
+        self,
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         while True:
             try:
                 state = read_tensor_from_file(self.pipe, torch.bfloat16, (119, 8, 8))
-                legal_moves_mask = read_tensor_from_file(self.pipe, torch.int8, (73 * 8 * 8,))
+                legal_moves_mask = read_tensor_from_file(
+                    self.pipe, torch.int8, (73 * 8 * 8,)
+                )
                 policy = read_tensor_from_file(self.pipe, torch.int64, (1,))
                 value = read_tensor_from_file(self.pipe, torch.int64, (1,))
                 yield state, legal_moves_mask.to(torch.bool), policy[0], value[0]

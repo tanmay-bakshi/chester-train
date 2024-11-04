@@ -12,45 +12,45 @@ from torch.utils.data import DataLoader
 from dataset import ChessDatasetClient
 
 
-class LayerNorm2d(nn.Module):
+class RMSNorm2d(nn.Module):
     def __init__(self, num_channels, eps=1e-6):
-        super(LayerNorm2d, self).__init__()
+        super(RMSNorm2d, self).__init__()
         self.weight = nn.Parameter(torch.ones(1, num_channels, 1, 1))
         self.bias = nn.Parameter(torch.zeros(1, num_channels, 1, 1))
         self.eps = eps
 
     def forward(self, x):
-        # x: (N, C, H, W)
-        mean = x.mean([2, 3], keepdim=True)
-        var = x.var([2, 3], keepdim=True, unbiased=False)
-        x = (x - mean) / (var + self.eps).sqrt()
-        return self.weight * x + self.bias
+        rms = torch.sqrt(x.pow(2).mean(dim=[2, 3], keepdim=True) + self.eps)
+        x_normalized = x / rms
+        return self.weight * x_normalized + self.bias
 
 
 class ConvNeXtBlock(nn.Module):
-    def __init__(self, dim: int, drop_path: float = 0., layer_scale_init_value: float = 1e-6):
+    def __init__(self, dim: int, layer_scale_init_value: float = 1e-6):
         super(ConvNeXtBlock, self).__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)  # depthwise conv
-        self.norm = LayerNorm2d(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise conv1
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim)
+        self.norm = RMSNorm2d(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(4 * dim, dim)  # pointwise conv2
-        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim),
-                                  requires_grad=True) if layer_scale_init_value > 0 else None
-        self.drop_path = nn.Identity()  # DropPath can be added if needed
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = (
+            nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
+            if layer_scale_init_value > 0
+            else None
+        )
 
     def forward(self, x: Tensor) -> Tensor:
-        input = x
+        orig_x = x
         x = self.dwconv(x)
         x = self.norm(x)
-        x = x.permute(0, 2, 3, 1)  # NCHW to NHWC for Linear layers
+        x = x.permute(0, 2, 3, 1)  # NCHW to NHWC
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.pwconv2(x)
         x = x.permute(0, 3, 1, 2)  # NHWC to NCHW
         if self.gamma is not None:
             x = self.gamma.view(1, -1, 1, 1) * x
-        x = input + self.drop_path(x)
+        x = orig_x + x
         return x
 
 
@@ -60,15 +60,13 @@ class AlphaZeroChessNetwork(nn.Module):
         input_channels: int = 119,
         residual_blocks: int = 30,
         channels: int = 128,
-        action_space_size: int = 73 * 8 * 8,
     ):
         super().__init__()
         self.input_conv = nn.Sequential(
             nn.Conv2d(input_channels, channels, kernel_size=3, padding=1),
-            LayerNorm2d(channels, eps=1e-6),
+            RMSNorm2d(channels, eps=1e-6),
         )
 
-        # Create ConvNeXt blocks
         self.residual_layers = nn.Sequential(
             *[ConvNeXtBlock(channels) for _ in range(residual_blocks)]
         )
