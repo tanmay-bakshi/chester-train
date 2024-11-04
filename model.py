@@ -6,9 +6,11 @@ import lightning.pytorch.callbacks
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from attention import Attention, SinCosPosEmbed
 from convnext import ConvNeXtBlock, RMSNorm2d
 from dataset import ChessDatasetClient
 
@@ -17,45 +19,56 @@ class AlphaZeroChessNetwork(nn.Module):
     def __init__(
         self,
         input_channels: int = 119,
-        residual_blocks: int = 30,
         channels: int = 128,
+        conv_blocks: int = 7,
+        attn_blocks: int = 10,
     ):
         super().__init__()
-        self.input_conv = nn.Sequential(
+        self.conv_blocks = nn.Sequential(
             nn.Conv2d(input_channels, channels, kernel_size=3, padding=1),
             RMSNorm2d(channels, eps=1e-6),
+            *[ConvNeXtBlock(channels) for _ in range(conv_blocks)]
         )
 
-        self.residual_layers = nn.Sequential(
-            *[ConvNeXtBlock(channels) for _ in range(residual_blocks)]
+        self.pos_embed = nn.Parameter(SinCosPosEmbed(dim=channels)(8, 8)[None], requires_grad=False)
+        self.pos_embed_proj = nn.Linear(channels, channels)
+        nn.init.xavier_uniform_(self.pos_embed_proj.weight)
+        nn.init.constant_(self.pos_embed_proj.bias, 0)
+
+        self.value_token = nn.Parameter(torch.zeros(1, 1, channels), requires_grad=True)
+        nn.init.xavier_uniform_(self.value_token)
+
+        self.attn_blocks = nn.Sequential(
+            *[
+                Attention(
+                    dim=channels,
+                    num_query_heads=32,
+                    num_key_value_heads=8,
+                    mlp_ratio=4,
+                )
+                for _ in range(attn_blocks)
+            ]
         )
 
-        # Policy head
-        self.policy_head = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=1),
-            nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels, 73, kernel_size=1),
-            nn.Flatten(),
-        )
-
-        # Value head
-        self.value_head = nn.Sequential(
-            nn.Conv2d(channels, 8, kernel_size=1),
-            nn.BatchNorm2d(8),
-            nn.ReLU(inplace=True),
-            nn.Flatten(),
-            nn.Linear(8 * 8 * 8, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 3),
-        )
+        self.policy_head = nn.Linear(channels, 73)
+        self.value_head = nn.Linear(channels, 1)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        x = self.input_conv(x)
-        x = self.residual_layers(x)
+        x = self.conv_blocks(x)
+        x = rearrange(x, "b c h w -> b (h w) c")
 
-        policy = self.policy_head(x)
-        value = self.value_head(x)
+        pos_embed = self.pos_embed_proj(self.pos_embed)
+        x = x + pos_embed
+        x = torch.cat((self.value_token.expand(x.size(0), -1, -1), x), dim=1)
+
+        x = self.attn_blocks(x)
+        x_value = x[:, 0]
+        x_policy = x[:, 1:]
+
+        policy = self.policy_head(x_policy)
+        policy = rearrange(policy, "b (h w) c -> b (c h w)", h=8, w=8)
+
+        value = self.value_head(x_value)
 
         return policy, value
 
